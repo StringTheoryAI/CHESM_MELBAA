@@ -1,118 +1,90 @@
-import { GroundX } from "groundx";
-import OpenAI from "openai";
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const gx = new GroundX({ api_key: process.env.GROUNDX_API_KEY });
-
-function pickSearchId() {
-  const b = process.env.GROUNDX_BUCKET_ID && parseInt(process.env.GROUNDX_BUCKET_ID, 10);
-  const p = process.env.GROUNDX_PROJECT_ID && parseInt(process.env.GROUNDX_PROJECT_ID, 10);
-  const g = process.env.GROUNDX_GROUP_ID && parseInt(process.env.GROUNDX_GROUP_ID, 10);
-  if (b) return b;
-  if (p) return p;
-  if (g) return g;
-  throw new Error("Set one of GROUNDX_BUCKET_ID / GROUNDX_PROJECT_ID / GROUNDX_GROUP_ID");
-}
-
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-}
-
-async function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", c => (data += c));
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(data || "{}"));
-      } catch (e) {
-        reject(e);
-      }
-    });
-  });
-}
-
-function toSources(results = []) {
-  return results.slice(0, 10).map((r, i) => {
-    const title =
-      r.searchData?.title ||
-      r.searchData?.fileName ||
-      (r.sourceUrl ? new URL(r.sourceUrl).pathname.split("/").pop() : `Document ${r.documentId}`);
-    return {
-      n: i + 1,
-      title,
-      url: r.sourceUrl || "",
-      page: r.searchData?.pageNumber ?? r.searchData?.page ?? null,
-      documentId: r.documentId
-    };
-  });
-}
-
-function buildSourcesForPrompt(sources) {
-  return sources
-    .map(s => `${s.n}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.url ? ` — ${s.url}` : ""}`)
-    .join("\n");
-}
+// api/chat.js
+// Serverless endpoint for Typebot → GroundX (RAG) → OpenAI → Markdown + clickable citations
 
 export default async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
-    const { query } = await readJson(req);
-    if (!query || typeof query !== "string") {
-      return res.status(400).json({ error: "Missing 'query' string" });
+    const { query } = req.body;
+    if (!query) {
+      return res.status(400).json({ error: "Missing query" });
     }
 
-    const id = pickSearchId();
-    const searchResp = await gx.search.content({ id, query });
-    const search = searchResp?.search || {};
-    const llmText = search.text || "";
-    const results = Array.isArray(search.results) ? search.results : [];
-    const sources = toSources(results);
-
-    if (!llmText) {
-      return res.status(200).json({
-        answer_md: `I couldn’t find relevant passages for “${query}”.`,
-        sources: []
-      });
-    }
-
-    const system = [
-      "You are a careful academic assistant.",
-      "Use ONLY the provided context to support claims.",
-      "Add numbered in-text citations like [1] or [2,3] immediately after any sentence that relies on sources.",
-      "Never invent citation numbers—choose only from the list provided.",
-      "Prefer pinpointing (include page numbers in prose when supplied).",
-      "Return Markdown only."
-    ].join(" ");
-
-    const user = [
-      `Question: ${query}`,
-      "",
-      "Context:",
-      llmText,
-      "",
-      "Citable sources (numbers you may cite):",
-      buildSourcesForPrompt(sources)
-    ].join("\n");
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user }
-      ],
-      temperature: 0.2
+    // Step 1 — Search GroundX
+    const gxResp = await fetch("https://api.eyelevel.ai/search/content", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.GROUNDX_API_KEY}`,
+      },
+      body: JSON.stringify({
+        bucketId: parseInt(process.env.GROUNDX_BUCKET_ID, 10),
+        query,
+        numResults: 5
+      }),
     });
 
-    const answer_md = completion.choices?.[0]?.message?.content?.trim() || "No answer.";
-    return res.status(200).json({ answer_md, sources });
+    if (!gxResp.ok) {
+      const errText = await gxResp.text();
+      throw new Error(`GroundX search failed: ${errText}`);
+    }
+
+    const gxData = await gxResp.json();
+
+    // Step 2 — Build context string with citations
+    const context = gxData.search.results
+      .map((r, i) => {
+        const url = r.sourceUrl || r.url || "#";
+        return `[${i + 1}] ${r.text}\nSource: ${url}`;
+      })
+      .join("\n\n");
+
+    // Step 3 — Ask OpenAI to answer with inline citation numbers
+    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: "You are an academic assistant. Use the provided sources to answer the user's question. Always cite sources as [1], [2], etc., matching the numbering in the context."
+          },
+          {
+            role: "user",
+            content: `Question: ${query}\n\nContext:\n${context}`
+          }
+        ],
+        temperature: 0.2,
+      }),
+    });
+
+    if (!openaiResp.ok) {
+      const errText = await openaiResp.text();
+      throw new Error(`OpenAI call failed: ${errText}`);
+    }
+
+    const openaiData = await openaiResp.json();
+    const answer = openaiData.choices?.[0]?.message?.content || "No answer.";
+
+    // Step 4 — Return Markdown answer + clickable sources
+    const sources = gxData.search.results.map((r, i) => ({
+      number: i + 1,
+      url: r.sourceUrl || r.url || "#",
+    }));
+
+    res.status(200).json({
+      answer_md: answer,
+      sources
+    });
+
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message || "Server error" });
+    res.status(500).json({ error: err.message || "Unknown error" });
   }
 }
