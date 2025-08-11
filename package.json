@@ -1,13 +1,14 @@
 {
-  "name": "typebot-groundx-rag",
-  "private": true,
-  "type": "module",
+  "name": "chesm-typebot-groundx",
+  "version": "1.0.0",
+  "description": "Serverless endpoint for Typebot → GroundX → OpenAI",
+  "main": "api/chat.js",
   "scripts": {
-    "dev": "vercel dev",
-    "start": "vercel dev"
+    "start": "vercel dev",
+    "deploy": "vercel --prod"
   },
-  "dependencies": {
-    "groundx": "^0.4.0",
-    "openai": "^4.58.1"
+  "dependencies": {},
+  "engines": {
+    "node": ">=18"
   }
 }
