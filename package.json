@@ -1,4 +1,3 @@
-cat > package.json <<'EOF'
 {
   "name": "typebot-groundx-rag",
   "private": true,
@@ -12,4 +11,3 @@ cat > package.json <<'EOF'
     "openai": "^4.58.1"
   }
 }
-EOF

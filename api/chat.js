@@ -1,5 +1,3 @@
-mkdir -p api
-cat > api/chat.js <<'EOF'
 import { GroundX } from "groundx";
 import OpenAI from "openai";
 
@@ -26,7 +24,13 @@ async function readJson(req) {
   return new Promise((resolve, reject) => {
     let data = "";
     req.on("data", c => (data += c));
-    req.on("end", () => { try { resolve(JSON.parse(data || "{}")); } catch (e) { reject(e); } });
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(data || "{}"));
+      } catch (e) {
+        reject(e);
+      }
+    });
   });
 }
 
@@ -112,4 +116,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: err.message || "Server error" });
   }
 }
-EOF
