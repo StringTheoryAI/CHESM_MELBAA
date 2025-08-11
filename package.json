@@ -1,0 +1,15 @@
+cat > package.json <<'EOF'
+{
+  "name": "typebot-groundx-rag",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "groundx": "^0.4.0",
+    "openai": "^4.58.1"
+  }
+}
+EOF

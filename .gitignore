@@ -1,0 +1,6 @@
+cat > .gitignore <<'EOF'
+.env
+.env.local
+node_modules/
+.vercel/
+EOF
