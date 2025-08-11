@@ -38,29 +38,55 @@ export default async function handler(req, res) {
 
     const gxData = await gxRes.json();
 
-    // Combine sources for LLM context
-    const context = gxData.search.results
-      .map(r => r.text || "")
+    const results = gxData.search?.results || [];
+
+    if (results.length === 0) {
+      return res.status(200).json({
+        answer_md: "No relevant results found.",
+        sources: [],
+      });
+    }
+
+    // Build context with numbered citations
+    const context = results
+      .map(
+        (r, i) =>
+          `[${i + 1}] ${r.text || ""}\nSource: ${r.multimodalUrl || r.fileName}`
+      )
       .join("\n\n");
 
-    // --- Ask OpenAI ---
+    // --- Ask OpenAI to produce inline citations ---
     const aiRes = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // can change to gpt-4o or gpt-4
+      model: "gpt-4o-mini", // can change to gpt-4o
       messages: [
-        { role: "system", content: "Answer the question using the provided context." },
-        { role: "user", content: `Context:\n${context}\n\nQuestion: ${query}` },
+        {
+          role: "system",
+          content:
+            "You are a helpful assistant. Use the provided context to answer the question and insert inline citations in the format [1], [2], etc. Match these to the sources provided. Keep output in Markdown.",
+        },
+        {
+          role: "user",
+          content: `Context:\n${context}\n\nQuestion: ${query}`,
+        },
       ],
     });
 
     const answer = aiRes.choices[0].message.content;
 
+    // Build clickable Markdown links for sources
+    const sources = results.map((r, i) => ({
+      number: i + 1,
+      title: r.fileName || `Source ${i + 1}`,
+      url: r.multimodalUrl || "",
+    }));
+
+    const sources_md = sources
+      .map((s) => `[${s.number}]: ${s.url} "${s.title}"`)
+      .join("\n");
+
     res.status(200).json({
-      answer_md: answer,
-      sources: gxData.search.results.map(r => ({
-        id: r.documentId,
-        fileName: r.fileName,
-        url: r.multimodalUrl,
-      })),
+      answer_md: `${answer}\n\n---\n**Sources**\n${sources_md}`,
+      sources,
     });
   } catch (err) {
     console.error(err);
