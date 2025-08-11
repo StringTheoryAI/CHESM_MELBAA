@@ -1,8 +1,8 @@
-cat > vercel.json <<'EOF'
 {
   "version": 2,
   "functions": {
-    "api/chat.js": { "runtime": "nodejs20.x" }
+    "api/chat.js": {
+      "runtime": "nodejs20.x"
+    }
   }
 }
-EOF
