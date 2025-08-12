@@ -1,5 +1,5 @@
-// api/chat.js — GroundX (bucketId only, X-Api-Key) + OpenAI with inline [1]-style citations
-
+// api/chat.js — GroundX (search.content) + OpenAI
+// Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -12,15 +12,14 @@ export default async function handler(req, res) {
     for await (const c of req) chunks.push(c);
     const raw = Buffer.concat(chunks).toString("utf8");
     let body = {};
-    try { body = raw ? JSON.parse(raw) : {}; }
-    catch { return res.status(400).json({ error: "Invalid JSON body" }); }
+    try { body = raw ? JSON.parse(raw) : {}; } catch { return res.status(400).json({ error: "Invalid JSON body" }); }
 
     const query = (body.query || "").trim();
     if (!query) return res.status(400).json({ error: "Missing 'query' string" });
 
     // Env
     const GX_KEY    = process.env.GROUNDX_API_KEY;
-    const GX_BUCKET = process.env.GROUNDX_BUCKET_ID; // <- you said this is the one you have
+    const GX_BUCKET = process.env.GROUNDX_BUCKET_ID; // numeric or UUID, goes in the URL path
     const OA_KEY    = process.env.OPENAI_API_KEY;
     const OA_MODEL  = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
@@ -28,17 +27,21 @@ export default async function handler(req, res) {
     if (!GX_BUCKET) return res.status(500).json({ error: "Missing GROUNDX_BUCKET_ID" });
     if (!OA_KEY)    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
-    // --- GroundX search: bucketId + X-Api-Key ---
-    const gxResp = await fetch("https://api.groundx.ai/api/v1/search/content", {
+    // ---- GroundX search.content ----
+    // Docs: POST https://api.groundx.ai/api/v1/search/:id  (id = bucketId/groupId/documentId)
+    // Header: X-API-Key
+    // Body: { query, n?, verbosity?, filter?, relevance? }
+    const gxUrl = `https://api.groundx.ai/api/v1/search/${encodeURIComponent(GX_BUCKET)}`;
+    const gxResp = await fetch(gxUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Api-Key": GX_KEY
+        "X-API-Key": GX_KEY
       },
       body: JSON.stringify({
-        bucketId: Number(GX_BUCKET),
         query,
-        n: 5
+        n: 5,
+        verbosity: 2
       })
     });
 
@@ -58,7 +61,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Build numbered sources + compact context
+    // Sources + context
     const sources = results.slice(0, 10).map((r, i) => ({
       number: i + 1,
       title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
@@ -66,21 +69,22 @@ export default async function handler(req, res) {
       page: r.searchData?.pageNumber ?? r.searchData?.page ?? null
     }));
 
-    const context = llmText || results.map((r, i) =>
-      `[${i + 1}] ${r.suggestedText || r.text || ""}`
-    ).join("\n\n");
+    const context = llmText || results
+      .map((r, i) => `[${i + 1}] ${r.suggestedText || r.text || ""}`)
+      .join("\n\n");
 
-    // --- OpenAI completion with inline [n] citations ---
+    // ---- OpenAI for final answer (Markdown with inline [n]) ----
     const oaResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OA_KEY}` },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OA_KEY}` },
       body: JSON.stringify({
         model: OA_MODEL,
         temperature: 0.2,
         messages: [
           {
             role: "system",
-            content: "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output Markdown."
+            content:
+              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output Markdown."
           },
           {
             role: "user",
@@ -105,7 +109,7 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
     const oaData = await oaResp.json();
     const answer = oaData?.choices?.[0]?.message?.content?.trim() || "No answer.";
 
-    // Reference-style links for clickability in Typebot
+    // Reference links (clickable in Typebot)
     const sources_md = sources.map(s => `[${s.number}]: ${s.url || ""} "${s.title || ""}"`).join("\n");
 
     return res.status(200).json({
