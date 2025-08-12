@@ -1,49 +1,77 @@
+// api/chat.js — GroundX (no SDK) + OpenAI with inline [1]-style citations
+// Works on Vercel Node 18/20. Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY.
+
 export default async function handler(req, res) {
   try {
-    const { query } = req.body;
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-    // ---- Env checks ----
+    // Parse JSON body (Vercel Node functions don't auto-parse)
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks).toString("utf8");
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON body" });
+    }
+
+    const query = (body.query || "").trim();
+    if (!query) return res.status(400).json({ error: "Missing 'query' string" });
+
+    // Env vars
     const GX_KEY = process.env.GROUNDX_API_KEY;
     const GX_BUCKET = process.env.GROUNDX_BUCKET_ID;
     const OA_KEY = process.env.OPENAI_API_KEY;
     const OA_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-    if (!GX_KEY || !GX_BUCKET || !OA_KEY) {
-      return res.status(500).json({
-        error: "Missing environment variables. Check Vercel settings."
-      });
-    }
+    if (!GX_KEY) return res.status(500).json({ error: "Missing GROUNDX_API_KEY" });
+    if (!GX_BUCKET) return res.status(500).json({ error: "Missing GROUNDX_BUCKET_ID" });
+    if (!OA_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
-    // ---- Step 1: Call GroundX Search ----
-    const gxUrl = `https://api.groundx.ai/api/v1/search`;
-    const gxResp = await fetch(gxUrl, {
+    // --- GroundX search (correct path + Bearer header) ---
+    const gxResp = await fetch("https://api.groundx.ai/api/v1/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GX_KEY}`  // ✅ Correct format
+        "Authorization": `Bearer ${GX_KEY}`  // <-- important
       },
       body: JSON.stringify({
-        bucketId: GX_BUCKET,
+        bucketId: Number(GX_BUCKET),
         query,
-        count: 5
+        numResults: 5
       })
     });
 
-    const gxData = await gxResp.json();
     if (!gxResp.ok) {
-      return res.status(500).json({
-        error: `GroundX search failed: ${JSON.stringify(gxData, null, 2)}`
+      const errText = await gxResp.text();
+      return res.status(502).json({ error: `GroundX search failed: ${errText}` });
+    }
+
+    const gxData = await gxResp.json();
+    const results = gxData?.search?.results || [];
+    if (!Array.isArray(results) || results.length === 0) {
+      return res.status(200).json({
+        answer_md: `I couldn’t find relevant passages for “${query}”.`,
+        sources: []
       });
     }
 
-    // ---- Step 2: Prepare context for OpenAI ----
-    const sourcesText = gxData.results
-      .map((r, i) => `Source ${i + 1}: ${r.content}`)
+    // Build context and sources for the LLM
+    const context = results
+      .map((r, i) => `[${i + 1}] ${r.text || ""}\nSource: ${r.multimodalUrl || r.sourceUrl || r.fileName || ""}`)
       .join("\n\n");
 
-    const prompt = `Answer the question using the sources below.\n\nQuestion: ${query}\n\nSources:\n${sourcesText}`;
+    const sources = results.map((r, i) => ({
+      number: i + 1,
+      title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
+      url: r.multimodalUrl || r.sourceUrl || ""
+    }));
 
-    // ---- Step 3: Call OpenAI ----
+    // --- OpenAI completion with inline [n] citation instruction ---
     const oaResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -52,26 +80,38 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: OA_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.2
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a careful academic assistant. Use ONLY the provided context to support claims. " +
+              "Add inline citations like [1], [2] that match the numbered sources. Keep output in Markdown."
+          },
+          { role: "user", content: `Context:\n${context}\n\nQuestion: ${query}` }
+        ]
       })
     });
 
-    const oaData = await oaResp.json();
     if (!oaResp.ok) {
-      return res.status(500).json({
-        error: `OpenAI call failed: ${JSON.stringify(oaData, null, 2)}`
-      });
+      const errText = await oaResp.text();
+      return res.status(502).json({ error: `OpenAI call failed: ${errText}` });
     }
 
-    // ---- Step 4: Respond ----
-    res.status(200).json({
-      answer: oaData.choices[0].message.content,
-      citations: gxData.results.map(r => r.fileName || r.documentId)
-    });
+    const oaData = await oaResp.json();
+    const answer = oaData?.choices?.[0]?.message?.content?.trim() || "No answer.";
 
+    // Markdown reference links at the bottom for clickability
+    const sources_md = sources
+      .map((s) => `[${s.number}]: ${s.url || ""} "${s.title || ""}"`)
+      .join("\n");
+
+    return res.status(200).json({
+      answer_md: `${answer}\n\n---\n**Sources**\n${sources_md}`,
+      sources
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
+    console.error("chat.js error:", err);
+    return res.status(500).json({ error: err?.message || "Server error" });
   }
 }
