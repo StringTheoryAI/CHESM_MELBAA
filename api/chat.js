@@ -1,58 +1,75 @@
-// api/chat.js — GroundX (no SDK) + OpenAI with inline [1]-style citations
-// Works on Vercel Node 18/20. Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY.
+// api/chat.js
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
-      res.setHeader("Allow", "POST");
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // Parse JSON body (Vercel Node functions don't auto-parse)
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    const raw = Buffer.concat(chunks).toString("utf8");
-    let body = {};
-    try {
-      body = raw ? JSON.parse(raw) : {};
-    } catch {
-      return res.status(400).json({ error: "Invalid JSON body" });
+    const { query } = req.body;
+    if (!query) {
+      return res.status(400).json({ error: "Missing 'query' in request body" });
     }
 
-    const query = (body.query || "").trim();
-    if (!query) return res.status(400).json({ error: "Missing 'query' string" });
-
-    // Env vars
+    // ---- Env checks ----
     const GX_KEY = process.env.GROUNDX_API_KEY;
     const GX_BUCKET = process.env.GROUNDX_BUCKET_ID;
     const OA_KEY = process.env.OPENAI_API_KEY;
     const OA_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-    if (!GX_KEY) return res.status(500).json({ error: "Missing GROUNDX_API_KEY" });
-    if (!GX_BUCKET) return res.status(500).json({ error: "Missing GROUNDX_BUCKET_ID" });
-    if (!OA_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-
-    // --- GroundX search (correct path + Bearer header) ---
-    const gxResp = await fetch("https://api.groundx.ai/api/v1/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${GX_KEY}`  // <-- important
-      },
-      body: JSON.stringify({
-        bucketId: Number(GX_BUCKET),
-        query,
-        numResults: 5
-      })
-    });
-
-    if (!gxResp.ok) {
-      const errText = await gxResp.text();
-      return res.status(502).json({ error: `GroundX search failed: ${errText}` });
+    if (!GX_KEY || !GX_BUCKET || !OA_KEY) {
+      return res.status(500).json({
+        error: "Missing one or more required environment variables"
+      });
     }
 
-    const gxData = await gxResp.json();
-    const results = gxData?.search?.results || [];
+    // --- Helper: GroundX search with auth/host permutations ---
+    async function gxSearch({ key, bucketId, query }) {
+      const payload = JSON.stringify({
+        bucketId: Number(bucketId),
+        query,
+        numResults: 5
+      });
+
+      const tries = [
+        {
+          url: "https://api.groundx.ai/api/v1/search",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }
+        },
+        {
+          url: "https://api.groundx.ai/api/v1/search",
+          headers: { "Content-Type": "application/json", "x-api-key": key }
+        },
+        {
+          url: "https://api.eyelevel.ai/api/v1/search",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }
+        },
+        {
+          url: "https://api.eyelevel.ai/api/v1/search",
+          headers: { "Content-Type": "application/json", "x-api-key": key }
+        },
+        {
+          url: "https://api.groundx.ai/api/v1/search",
+          headers: { "Content-Type": "application/json", Authorization: `Token ${key}` }
+        }
+      ];
+
+      let lastText = "";
+      for (const t of tries) {
+        const r = await fetch(t.url, { method: "POST", headers: t.headers, body: payload });
+        if (r.ok) return r.json();
+        lastText = await r.text();
+        if (!/api key|unauthorized|authorization/i.test(lastText)) {
+          throw new Error(`GroundX search failed: ${lastText}`);
+        }
+      }
+      throw new Error(`GroundX auth failed after retries: ${lastText}`);
+    }
+
+    // --- Run GroundX search ---
+    const gxData = await gxSearch({ key: GX_KEY, bucketId: GX_BUCKET, query });
+    const results = gxData?.search?.results || gxData?.results || [];
+
     if (!Array.isArray(results) || results.length === 0) {
       return res.status(200).json({
         answer_md: `I couldn’t find relevant passages for “${query}”.`,
@@ -60,58 +77,51 @@ export default async function handler(req, res) {
       });
     }
 
-    // Build context and sources for the LLM
+    // --- Build context for OpenAI ---
     const context = results
-      .map((r, i) => `[${i + 1}] ${r.text || ""}\nSource: ${r.multimodalUrl || r.sourceUrl || r.fileName || ""}`)
+      .map((r, i) => `Source ${i + 1}: ${r.text || r.chunk || ""}`)
       .join("\n\n");
 
-    const sources = results.map((r, i) => ({
-      number: i + 1,
-      title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
-      url: r.multimodalUrl || r.sourceUrl || ""
-    }));
-
-    // --- OpenAI completion with inline [n] citation instruction ---
-    const oaResp = await fetch("https://api.openai.com/v1/chat/completions", {
+    // --- Call OpenAI ---
+    const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${OA_KEY}`
+        Authorization: `Bearer ${OA_KEY}`
       },
       body: JSON.stringify({
         model: OA_MODEL,
-        temperature: 0.2,
         messages: [
           {
             role: "system",
             content:
-              "You are a careful academic assistant. Use ONLY the provided context to support claims. " +
-              "Add inline citations like [1], [2] that match the numbered sources. Keep output in Markdown."
+              "You are a helpful assistant. Use the provided context to answer the query. Cite sources as [Source #]."
           },
-          { role: "user", content: `Context:\n${context}\n\nQuestion: ${query}` }
-        ]
+          { role: "user", content: `Context:\n${context}\n\nQuery: ${query}` }
+        ],
+        temperature: 0
       })
     });
 
-    if (!oaResp.ok) {
-      const errText = await oaResp.text();
-      return res.status(502).json({ error: `OpenAI call failed: ${errText}` });
+    if (!oaRes.ok) {
+      const errText = await oaRes.text();
+      throw new Error(`OpenAI API failed: ${errText}`);
     }
 
-    const oaData = await oaResp.json();
-    const answer = oaData?.choices?.[0]?.message?.content?.trim() || "No answer.";
+    const oaJson = await oaRes.json();
+    const answer = oaJson.choices?.[0]?.message?.content || "";
 
-    // Markdown reference links at the bottom for clickability
-    const sources_md = sources
-      .map((s) => `[${s.number}]: ${s.url || ""} "${s.title || ""}"`)
-      .join("\n");
-
-    return res.status(200).json({
-      answer_md: `${answer}\n\n---\n**Sources**\n${sources_md}`,
-      sources
+    // --- Return answer + sources ---
+    res.status(200).json({
+      answer_md: answer,
+      sources: results.map((r, i) => ({
+        id: i + 1,
+        text: r.text || r.chunk || "",
+        sourceUrl: r.sourceUrl || r.url || null
+      }))
     });
   } catch (err) {
-    console.error("chat.js error:", err);
-    return res.status(500).json({ error: err?.message || "Server error" });
+    console.error(err);
+    res.status(500).json({ error: err.message || "Server error" });
   }
 }
