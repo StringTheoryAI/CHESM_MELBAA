@@ -184,8 +184,8 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       return result;
     }
 
-    // Function to create clean inline citations (no sources list)
-    function createCleanInlineCitations(text, sourcesArray) {
+    // Function to create HTML tooltips for Botpress
+    function createHTMLTooltips(text, sourcesArray) {
       let result = text;
       
       sourcesArray.forEach((source) => {
@@ -199,11 +199,12 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
           .replace(/_/g, ' ');
         
         const pageInfo = source.page ? ` (p. ${source.page})` : '';
+        const tooltipContent = `${cleanTitle}${pageInfo}\n\n"${source.chunk_text || 'No preview available'}"`;
         
-        // Create a cleaner citation format
-        const cleanCitation = `[[${source.number}: ${cleanTitle.substring(0, 30)}${cleanTitle.length > 30 ? '...' : ''}${pageInfo}]](${source.url})`;
+        // Create HTML with tooltip
+        const htmlTooltip = `<a href="${source.url}" target="_blank" title="${tooltipContent.replace(/"/g, '&quot;')}" style="color: #0066cc; text-decoration: underline; font-weight: bold;">[${source.number}]</a>`;
         
-        result = result.replace(citationRegex, cleanCitation);
+        result = result.replace(citationRegex, htmlTooltip);
       });
       
       return result;
@@ -213,11 +214,11 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
     const answer_md = answer;
     const answer_html = createClickableCitations(answer, sources);
     const answer_hover_citations = createHoverCitations(answer, sources);
-    const answer_clean_inline = createCleanInlineCitations(answer, sources);
+    const answer_html_tooltips = createHTMLTooltips(answer, sources);
 
-    // No sources section for clean format
-    const clean_format = answer_clean_inline;
+    // Clean formats
     const hover_format = answer_hover_citations;
+    const html_tooltip_format = answer_html_tooltips;
 
     // Enhanced sources section for markdown (fallback)
     const sources_md = sources.map(s => {
@@ -237,8 +238,8 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       data: {
         answer_md: `${answer_md}\n\n---\n**Sources**\n${sources_md}`,
         answer_html: `${answer_html}<br><br><hr><strong>Sources</strong><br><br>${sources_html}`,
-        answer_clean_inline: clean_format, // Clean format with no sources list
-        answer_hover_citations: hover_format, // Hover tooltips
+        answer_hover_citations: hover_format, // Markdown with hover tooltips
+        answer_html_tooltips: html_tooltip_format, // HTML with hover tooltips
         sources: sources
       }
     });
