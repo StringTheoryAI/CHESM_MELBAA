@@ -1,4 +1,4 @@
-// api/chat.js — GroundX (search.content) + OpenAI
+// api/chat.js — GroundX (search.content) + OpenAI with clickable citations
 // Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY
 export default async function handler(req, res) {
   try {
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         query,
-        n: 5,
+        n: 10, // Increased for more sources
         verbosity: 2
       })
     });
@@ -56,18 +56,28 @@ export default async function handler(req, res) {
 
     if (!llmText && results.length === 0) {
       return res.status(200).json({
-        answer_md: `I couldn’t find relevant passages for “${query}”.`,
+        answer_md: `I couldn't find relevant passages for "${query}".`,
+        answer_html: `I couldn't find relevant passages for "${query}".`,
         sources: []
       });
     }
 
-    // Sources + context
-    const sources = results.slice(0, 10).map((r, i) => ({
-      number: i + 1,
-      title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
-      url: r.sourceUrl || r.multimodalUrl || "",
-      page: r.searchData?.pageNumber ?? r.searchData?.page ?? null
-    }));
+    // Enhanced sources with more details
+    const sources = results.slice(0, 10).map((r, i) => {
+      const chunkText = r.suggestedText || r.text || "";
+      const chunkPreview = chunkText.length > 150 ? 
+        chunkText.substring(0, 150) + "..." : 
+        chunkText;
+
+      return {
+        number: i + 1,
+        title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
+        url: r.sourceUrl || r.multimodalUrl || "",
+        page: r.searchData?.pageNumber ?? r.searchData?.page ?? null,
+        chunk_text: chunkPreview,
+        confidence: r.score || null
+      };
+    });
 
     const context = llmText || results
       .map((r, i) => `[${i + 1}] ${r.suggestedText || r.text || ""}`)
@@ -84,7 +94,7 @@ export default async function handler(req, res) {
           {
             role: "system",
             content:
-              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output Markdown."
+              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output clear, well-structured text with proper citations."
           },
           {
             role: "user",
@@ -109,12 +119,50 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
     const oaData = await oaResp.json();
     const answer = oaData?.choices?.[0]?.message?.content?.trim() || "No answer.";
 
-    // Reference links (clickable in Typebot)
-    const sources_md = sources.map(s => `[${s.number}]: ${s.url || ""} "${s.title || ""}"`).join("\n");
+    // Function to convert citations to clickable HTML links
+    function createClickableCitations(text, sourcesArray) {
+      let htmlText = text;
+      
+      sourcesArray.forEach((source) => {
+        const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
+        
+        // Create tooltip content
+        const pageInfo = source.page ? ` (p. ${source.page})` : '';
+        const tooltipContent = `${source.title}${pageInfo}${source.chunk_text ? '\n\nExcerpt: "' + source.chunk_text + '"' : ''}`;
+        
+        // Create clickable citation with tooltip
+        const clickableLink = `<a href="${source.url}" target="_blank" 
+          title="${tooltipContent.replace(/"/g, '&quot;')}" 
+          style="color: #0066cc; text-decoration: underline; font-weight: 500;">[${source.number}]</a>`;
+        
+        htmlText = htmlText.replace(citationRegex, clickableLink);
+      });
+      
+      return htmlText;
+    }
+
+    // Create both markdown and HTML versions
+    const answer_md = answer;
+    const answer_html = createClickableCitations(answer, sources);
+
+    // Enhanced sources section for markdown
+    const sources_md = sources.map(s => {
+      const pageInfo = s.page ? ` (p. ${s.page})` : '';
+      const chunkInfo = s.chunk_text ? `\n   Excerpt: "${s.chunk_text}"` : '';
+      return `[${s.number}]: ${s.url || ""} "${s.title || ""}"${pageInfo}${chunkInfo}`;
+    }).join("\n");
+
+    // Enhanced sources section for HTML
+    const sources_html = sources.map(s => {
+      const pageInfo = s.page ? ` (p. ${s.page})` : '';
+      const chunkInfo = s.chunk_text ? `<br><em>Excerpt: "${s.chunk_text}"</em>` : '';
+      return `<strong>[${s.number}]:</strong> <a href="${s.url}" target="_blank">${s.title}</a>${pageInfo}${chunkInfo}`;
+    }).join("<br><br>");
 
     return res.status(200).json({
-      answer_md: `${answer}\n\n---\n**Sources**\n${sources_md}`,
-      sources
+      answer_md: `${answer_md}\n\n---\n**Sources**\n${sources_md}`,
+      answer_html: `${answer_html}<br><br><hr><strong>Sources</strong><br><br>${sources_html}`,
+      sources: sources
     });
 
   } catch (err) {
