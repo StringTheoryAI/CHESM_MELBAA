@@ -1,4 +1,4 @@
-// api/chat.js — GroundX (search.content) + OpenAI with CORS support
+// api/chat.js — GroundX (search.content) + OpenAI with CORS support and clean citations
 // Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY
 export default async function handler(req, res) {
   // Add CORS headers for Botpress and other clients
@@ -70,6 +70,8 @@ export default async function handler(req, res) {
         data: {
           answer_md: `I couldn't find relevant passages for "${query}".`,
           answer_html: `I couldn't find relevant passages for "${query}".`,
+          answer_clean_inline: `I couldn't find relevant passages for "${query}".`,
+          answer_hover_citations: `I couldn't find relevant passages for "${query}".`,
           sources: []
         }
       });
@@ -154,29 +156,70 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       return htmlText;
     }
 
-    // Function to create Markdown-style links (alternative for Botpress)
-    function createMarkdownCitations(text, sourcesArray) {
-      let markdownText = text;
+    // Function to create hover-enabled citations for Botpress
+    function createHoverCitations(text, sourcesArray) {
+      let result = text;
       
       sourcesArray.forEach((source) => {
         const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
+        
+        // Create clean title (remove file extensions and URL encoding)
+        const cleanTitle = source.title
+          .replace(/\.pdf$|\.docx?$/i, '')
+          .replace(/%2C/g, ',')
+          .replace(/\+/g, ' ')
+          .replace(/_/g, ' ');
+        
         const pageInfo = source.page ? ` (p. ${source.page})` : '';
         
-        // Create markdown link: [text](url)
-        const markdownLink = `[\\[${source.number}\\]](${source.url})`;
+        // Create tooltip content with excerpt
+        const tooltipText = `${cleanTitle}${pageInfo}\n\n"${source.chunk_text || 'No preview available'}"`;
         
-        markdownText = markdownText.replace(citationRegex, markdownLink);
+        // Create markdown link with hover title
+        const hoverLink = `[${source.number}](${source.url} "${tooltipText.replace(/"/g, '\'')}")`;
+        
+        result = result.replace(citationRegex, hoverLink);
       });
       
-      return markdownText;
+      return result;
+    }
+
+    // Function to create clean inline citations (no sources list)
+    function createCleanInlineCitations(text, sourcesArray) {
+      let result = text;
+      
+      sourcesArray.forEach((source) => {
+        const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
+        
+        // Create clean title
+        const cleanTitle = source.title
+          .replace(/\.pdf$|\.docx?$/i, '')
+          .replace(/%2C/g, ',')
+          .replace(/\+/g, ' ')
+          .replace(/_/g, ' ');
+        
+        const pageInfo = source.page ? ` (p. ${source.page})` : '';
+        
+        // Create a cleaner citation format
+        const cleanCitation = `[[${source.number}: ${cleanTitle.substring(0, 30)}${cleanTitle.length > 30 ? '...' : ''}${pageInfo}]](${source.url})`;
+        
+        result = result.replace(citationRegex, cleanCitation);
+      });
+      
+      return result;
     }
 
     // Create multiple output formats
     const answer_md = answer;
     const answer_html = createClickableCitations(answer, sources);
-    const answer_markdown_links = createMarkdownCitations(answer, sources);
+    const answer_hover_citations = createHoverCitations(answer, sources);
+    const answer_clean_inline = createCleanInlineCitations(answer, sources);
 
-    // Enhanced sources section for markdown
+    // No sources section for clean format
+    const clean_format = answer_clean_inline;
+    const hover_format = answer_hover_citations;
+
+    // Enhanced sources section for markdown (fallback)
     const sources_md = sources.map(s => {
       const pageInfo = s.page ? ` (p. ${s.page})` : '';
       const chunkInfo = s.chunk_text ? `\n   Excerpt: "${s.chunk_text}"` : '';
@@ -190,18 +233,12 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       return `<strong>[${s.number}]:</strong> <a href="${s.url}" target="_blank">${s.title}</a>${pageInfo}${chunkInfo}`;
     }).join("<br><br>");
 
-    // Markdown sources with links
-    const sources_markdown_links = sources.map(s => {
-      const pageInfo = s.page ? ` (p. ${s.page})` : '';
-      const chunkInfo = s.chunk_text ? `\n   Excerpt: "${s.chunk_text}"` : '';
-      return `**[${s.number}]:** [${s.title}](${s.url})${pageInfo}${chunkInfo}`;
-    }).join("\n\n");
-
     return res.status(200).json({
       data: {
         answer_md: `${answer_md}\n\n---\n**Sources**\n${sources_md}`,
         answer_html: `${answer_html}<br><br><hr><strong>Sources</strong><br><br>${sources_html}`,
-        answer_markdown_links: `${answer_markdown_links}\n\n---\n**Sources**\n${sources_markdown_links}`,
+        answer_clean_inline: clean_format, // Clean format with no sources list
+        answer_hover_citations: hover_format, // Hover tooltips
         sources: sources
       }
     });
