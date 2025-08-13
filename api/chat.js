@@ -109,7 +109,7 @@ export default async function handler(req, res) {
           {
             role: "system",
             content:
-              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output clear, well-structured text with proper citations. Restrict your output to approximately 100 words. Begin output with brief summary sentence, then continue with bullet points."
+              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output clear, well-structured text with proper citations. Restrict your output to approximately 200 words. Use Markdown. Begin output with brief summary sentence, then continue with bullet points."
           },
           {
             role: "user",
