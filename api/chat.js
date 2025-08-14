@@ -1,5 +1,77 @@
 // api/chat.js — GroundX (search.content) + OpenAI with CORS support and clean citations
 // Requires env vars: GROUNDX_API_KEY, GROUNDX_BUCKET_ID, OPENAI_API_KEY
+
+// Extract system prompt to a separate function for better maintainability
+function getSystemPrompt() {
+  return `You are a careful academic assistant specializing in osteoarthritis information. Use ONLY the provided context from the knowledge base to answer questions.
+
+## Citation Requirements
+- Add inline citations like [1], [2] matching the numbered sources
+- Every factual claim must include a citation
+- Use clear, well-structured text with proper citations
+- Restrict your output to approximately 200 words
+- Use Markdown formatting
+- Begin with a brief summary sentence, then continue with bullet points
+
+## Knowledge Base Restrictions
+- Do not answer from general knowledge or internet sources
+- STICK TO THE TOPIC OF OSTEOARTHRITIS
+- Only use information from the provided context
+- If information isn't in the context, state that clearly
+
+## Language Guidelines
+### Required Terminology
+- Always say "osteoarthritis" instead of "OA"
+- Say "have obesity" instead of "obesity"
+- Say "have overweight" instead of "overweight"
+
+### Prohibited Terms (Never Use)
+- Degenerative, degradation
+- Bones rubbing, bone on bone
+- Chronic degenerative changes
+- Negative test results
+- Instability
+- Wear and tear, worn away
+- Neurological
+- Don't worry
+- Paresthesia
+- Lordosis, kyphosis
+- Disease
+- Effusion
+- Chronic
+- Diagnostics
+- "You are going to have to live with this"
+- End Stage A
+
+## Tone Adaptation
+### For Healthcare Professionals
+- Use professional, concise, clinical tone when user references:
+  - Evidence-based practice
+  - Clinical guidelines
+  - Patient management
+  - Medical terminology
+
+### For General Public
+- Use warm, clear, everyday language
+- Explain medical terms when necessary
+- Avoid jargon unless explained
+- Be supportive and encouraging
+
+## Conversation Guidelines
+1. Wait for the user to ask a question before responding
+2. If user intent is unclear, ask clarifying questions politely
+3. Rephrase questions to connect them to osteoarthritis when helpful
+4. Always use British English spelling
+5. Show citations for every factual statement
+6. Be concise but comprehensive within the word limit
+
+## Response Structure
+1. Brief summary statement answering the main question
+2. Key points as bullet points with citations
+3. Ensure all information ties back to osteoarthritis
+4. Maintain supportive, informative tone throughout`;
+}
+
 export default async function handler(req, res) {
   // Add CORS headers for Botpress and other clients
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,28 +92,34 @@ export default async function handler(req, res) {
 
     // Parse JSON body (Vercel Node functions don't auto-parse)
     const chunks = [];
-    for await (const c of req) chunks.push(c);
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
     const raw = Buffer.concat(chunks).toString("utf8");
+    
     let body = {};
-    try { body = raw ? JSON.parse(raw) : {}; } catch { return res.status(400).json({ error: "Invalid JSON body" }); }
+    try { 
+      body = raw ? JSON.parse(raw) : {}; 
+    } catch (parseError) { 
+      return res.status(400).json({ error: "Invalid JSON body" }); 
+    }
 
     const query = (body.query || "").trim();
-    if (!query) return res.status(400).json({ error: "Missing 'query' string" });
+    if (!query) {
+      return res.status(400).json({ error: "Missing 'query' string" });
+    }
 
-    // Env
-    const GX_KEY    = process.env.GROUNDX_API_KEY;
-    const GX_BUCKET = process.env.GROUNDX_BUCKET_ID; // numeric or UUID, goes in the URL path
-    const OA_KEY    = process.env.OPENAI_API_KEY;
-    const OA_MODEL  = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    // Environment variables
+    const GX_KEY = process.env.GROUNDX_API_KEY;
+    const GX_BUCKET = process.env.GROUNDX_BUCKET_ID;
+    const OA_KEY = process.env.OPENAI_API_KEY;
+    const OA_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-    if (!GX_KEY)    return res.status(500).json({ error: "Missing GROUNDX_API_KEY" });
+    if (!GX_KEY) return res.status(500).json({ error: "Missing GROUNDX_API_KEY" });
     if (!GX_BUCKET) return res.status(500).json({ error: "Missing GROUNDX_BUCKET_ID" });
-    if (!OA_KEY)    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+    if (!OA_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
     // ---- GroundX search.content ----
-    // Docs: POST https://api.groundx.ai/api/v1/search/:id  (id = bucketId/groupId/documentId)
-    // Header: X-API-Key
-    // Body: { query, n?, verbosity?, filter?, relevance? }
     const gxUrl = `https://api.groundx.ai/api/v1/search/${encodeURIComponent(GX_BUCKET)}`;
     const gxResp = await fetch(gxUrl, {
       method: "POST",
@@ -51,7 +129,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         query,
-        n: 10, // Increased for more sources
+        n: 10,
         verbosity: 2
       })
     });
@@ -78,43 +156,44 @@ export default async function handler(req, res) {
     }
 
     // Enhanced sources with more details
-    const sources = results.slice(0, 10).map((r, i) => {
-      const chunkText = r.suggestedText || r.text || "";
+    const sources = results.slice(0, 10).map((result, index) => {
+      const chunkText = result.suggestedText || result.text || "";
       const chunkPreview = chunkText.length > 150 ? 
         chunkText.substring(0, 150) + "..." : 
         chunkText;
 
       return {
-        number: i + 1,
-        title: r.searchData?.title || r.fileName || `Source ${i + 1}`,
-        url: r.sourceUrl || r.multimodalUrl || "",
-        page: r.searchData?.pageNumber ?? r.searchData?.page ?? null,
+        number: index + 1,
+        title: result.searchData?.title || result.fileName || `Source ${index + 1}`,
+        url: result.sourceUrl || result.multimodalUrl || "",
+        page: result.searchData?.pageNumber ?? result.searchData?.page ?? null,
         chunk_text: chunkPreview,
-        confidence: r.score || null
+        confidence: result.score || null
       };
     });
 
     const context = llmText || results
-      .map((r, i) => `[${i + 1}] ${r.suggestedText || r.text || ""}`)
+      .map((result, index) => `[${index + 1}] ${result.suggestedText || result.text || ""}`)
       .join("\n\n");
 
-    // ---- OpenAI for final answer (Markdown with inline [n]) ----
+    // ---- OpenAI for final answer ----
     const oaResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OA_KEY}` },
+      headers: { 
+        "Content-Type": "application/json", 
+        Authorization: `Bearer ${OA_KEY}` 
+      },
       body: JSON.stringify({
         model: OA_MODEL,
         temperature: 0.2,
         messages: [
           {
             role: "system",
-            content:
-              "You are a careful academic assistant. Use ONLY the provided context. Add inline citations like [1], [2] matching the numbered sources. Output clear, well-structured text with proper citations. Restrict your output to approximately 200 words. Use Markdown. Begin output with brief summary sentence, then continue with bullet points."
+            content: getSystemPrompt()
           },
           {
             role: "user",
-            content:
-`Question: ${query}
+            content: `Question: ${query}
 
 Context:
 ${context}
@@ -134,18 +213,15 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
     const oaData = await oaResp.json();
     const answer = oaData?.choices?.[0]?.message?.content?.trim() || "No answer.";
 
-    // Function to convert citations to clickable HTML links
+    // Citation formatting functions
     function createClickableCitations(text, sourcesArray) {
       let htmlText = text;
       
       sourcesArray.forEach((source) => {
         const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
-        
-        // Create tooltip content
         const pageInfo = source.page ? ` (p. ${source.page})` : '';
         const tooltipContent = `${source.title}${pageInfo}${source.chunk_text ? '\n\nExcerpt: "' + source.chunk_text + '"' : ''}`;
         
-        // Create clickable citation with tooltip
         const clickableLink = `<a href="${source.url}" target="_blank" 
           title="${tooltipContent.replace(/"/g, '&quot;')}" 
           style="color: #0066cc; text-decoration: underline; font-weight: 500;">[${source.number}]</a>`;
@@ -156,14 +232,12 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       return htmlText;
     }
 
-    // Function to create hover-enabled citations for Botpress
     function createHoverCitations(text, sourcesArray) {
       let result = text;
       
       sourcesArray.forEach((source) => {
         const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
         
-        // Create clean title (remove file extensions and URL encoding)
         const cleanTitle = source.title
           .replace(/\.pdf$|\.docx?$/i, '')
           .replace(/%2C/g, ',')
@@ -171,11 +245,7 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
           .replace(/_/g, ' ');
         
         const pageInfo = source.page ? ` (p. ${source.page})` : '';
-        
-        // Create tooltip content with excerpt
         const tooltipText = `${cleanTitle}${pageInfo}\n\n"${source.chunk_text || 'No preview available'}"`;
-        
-        // Create markdown link with hover title
         const hoverLink = `[${source.number}](${source.url} "${tooltipText.replace(/"/g, '\'')}")`;
         
         result = result.replace(citationRegex, hoverLink);
@@ -184,14 +254,12 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       return result;
     }
 
-    // Function to create HTML tooltips for Botpress
     function createHTMLTooltips(text, sourcesArray) {
       let result = text;
       
       sourcesArray.forEach((source) => {
         const citationRegex = new RegExp(`\\[${source.number}\\]`, 'g');
         
-        // Create clean title
         const cleanTitle = source.title
           .replace(/\.pdf$|\.docx?$/i, '')
           .replace(/%2C/g, ',')
@@ -201,7 +269,6 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
         const pageInfo = source.page ? ` (p. ${source.page})` : '';
         const tooltipContent = `${cleanTitle}${pageInfo}\n\n"${source.chunk_text || 'No preview available'}"`;
         
-        // Create HTML with tooltip
         const htmlTooltip = `<a href="${source.url}" target="_blank" title="${tooltipContent.replace(/"/g, '&quot;')}" style="color: #0066cc; text-decoration: underline; font-weight: bold;">[${source.number}]</a>`;
         
         result = result.replace(citationRegex, htmlTooltip);
@@ -216,18 +283,13 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
     const answer_hover_citations = createHoverCitations(answer, sources);
     const answer_html_tooltips = createHTMLTooltips(answer, sources);
 
-    // Clean formats
-    const hover_format = answer_hover_citations;
-    const html_tooltip_format = answer_html_tooltips;
-
-    // Enhanced sources section for markdown (fallback)
+    // Sources formatting
     const sources_md = sources.map(s => {
       const pageInfo = s.page ? ` (p. ${s.page})` : '';
       const chunkInfo = s.chunk_text ? `\n   Excerpt: "${s.chunk_text}"` : '';
       return `[${s.number}]: ${s.url || ""} "${s.title || ""}"${pageInfo}${chunkInfo}`;
     }).join("\n");
 
-    // Enhanced sources section for HTML
     const sources_html = sources.map(s => {
       const pageInfo = s.page ? ` (p. ${s.page})` : '';
       const chunkInfo = s.chunk_text ? `<br><em>Excerpt: "${s.chunk_text}"</em>` : '';
@@ -238,8 +300,8 @@ ${sources.map(s => `${s.number}. ${s.title}${s.page ? ` (p.${s.page})` : ""}${s.
       data: {
         answer_md: `${answer_md}\n\n---\n**Sources**\n${sources_md}`,
         answer_html: `${answer_html}<br><br><hr><strong>Sources</strong><br><br>${sources_html}`,
-        answer_hover_citations: hover_format, // Markdown with hover tooltips
-        answer_html_tooltips: html_tooltip_format, // HTML with hover tooltips
+        answer_hover_citations: answer_hover_citations,
+        answer_html_tooltips: answer_html_tooltips,
         sources: sources
       }
     });
