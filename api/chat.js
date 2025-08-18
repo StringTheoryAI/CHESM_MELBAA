@@ -80,7 +80,7 @@ function getSystemPrompt() {
 3. Key points as bullet points with citations
 4. Ensure all information ties back to osteoarthritis
 5. Maintain supportive, informative tone throughout
-6. At the end of your answer, display the three most relevant resources you can find in "**RESOURCES WITH SUMMARIES.csv". **Important** DO NOT derive any resource suggustions from any list or document other than "**RESOURCES WITH SUMMARIES.csv".  Begin this section with "<br>**Here are some of our Centre's resources that you may find useful:**". Present the three chosen resources as a list. Carefully match the title and URL of each resource from the .csv spreadsheet to ensure accuracy. Use this format to display resources: [Title](URL) - followed by one-sentence summary of how the resource is relevant to the user query.`;
+6. At the end of your answer, search the document: "**RESOURCES WITH SUMMARIES.csv", then display the three resources from the CSV that are most relevant to the user query. **Important** DO NOT derive any resource suggustions from any other list or document. ONLY use "**RESOURCES WITH SUMMARIES.csv" for resources suggestions.  Begin this section with "<br>**Here are some of our Centre's resources that you may find useful:**". Present the three chosen resources as a list. Carefully match the title and URL of each resource from the .csv spreadsheet to ensure accuracy. Use this format to display resources: [Title](URL) - followed by one-sentence summary of how the resource is relevant to the user query.`;
 }
 
 export default async function handler(req, res) {
